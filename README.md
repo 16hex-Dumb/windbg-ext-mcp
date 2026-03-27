@@ -1,144 +1,213 @@
-# WinDbg‑ext‑MCP
+# WinDbg-ext-MCP
 
-WinDbg extension + Python MCP server. Lets MCP‑compatible clients (Cursor, Claude, VS Code + Cline/Roo) drive WinDbg with clean, validated commands. Kernel‑first; user‑mode works too.
+WinDbg extension plus Python MCP server.
 
-## Contents
-- Quick Start
-- Architecture
-- Usage Examples
-- What’s Here
-- Sanity Check
-- Troubleshooting
-- Configuration
-- Tested With
-- Notes
+It lets MCP clients drive WinDbg over stdio while the extension talks to WinDbg over `\\.\pipe\windbgmcp`.
+
+Tested flow in this repo:
+- load the extension into WinDbg / WinDbgX
+- let the extension host the named pipe server
+- let the Python MCP server expose tools to MCP clients
 
 ## Quick Start
 
 Prereqs
 - Windows 10/11
-- WinDbg (Windows SDK “Debugging Tools for Windows”)
-- Visual Studio Build Tools (C++)
-- Python 3.10+ and Poetry 2.x
+- WinDbg or WinDbgX
+- Visual Studio Build Tools with C++
+- Python 3.10+
+- Poetry 2.x
 
-Build the extension (Developer PowerShell for VS):
+Build the extension from the repo root:
+
 ```powershell
 msbuild extension\windbgmcpExt.sln /p:Configuration=Release /p:Platform=x64
 ```
 
-Load in WinDbg:
-```text
-.load C:\path\to\windbgmcpExt.dll
+Recommended daily-use launch:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\launch_windbg_with_mcp.ps1
 ```
 
-Install and run the MCP server (in root directory):
+This script prefers `WinDbgX.exe` and auto-loads the built DLL.
+
+Manual fallback inside WinDbg:
+
+```text
+.load D:\path\to\windbgmcpExt.dll
+```
+
+After `.load`, the extension starts the pipe server automatically. `mcpstart` is only a fallback command if you need to restart it manually.
+
+Install Python dependencies and write MCP client config:
+
 ```powershell
 poetry install
+python install_client_config.py --install
+```
+
+Sanity check:
+
+```powershell
+python install_client_config.py --test
 poetry run selftest
+```
+
+## How It Works
+
+```text
+MCP Client (stdio) <-> Python MCP Server (stdio) <-> WinDbg Extension (named pipe) <-> WinDbg / target
+```
+
+- `extension/` contains the C++ WinDbg extension DLL.
+- `mcp_server/` contains the FastMCP server and tool implementations.
+- `install_client_config.py` writes client config for supported desktop clients.
+- `launch_windbg_with_mcp.ps1` starts WinDbg / WinDbgX and preloads the extension.
+- `mcp_server_launcher.py` resolves a usable Python runtime and is mainly for diagnostics.
+
+## Daily Use
+
+Typical workflow:
+
+1. Build the DLL once after code changes.
+2. Run `python install_client_config.py --install` once per machine or when the Python environment changes.
+3. Start WinDbg with `launch_windbg_with_mcp.ps1`.
+4. Restart your MCP client.
+5. Call `debug_session(action="status")` or `connection_manager(action="status")`.
+
+## Supported MCP Clients
+
+`install_client_config.py` currently writes config for:
+- Cursor
+- Claude Desktop
+- VS Code Cline
+- VS Code Roo Code
+- Windsurf
+
+Commands:
+
+```powershell
+python install_client_config.py --install --dry-run
+python install_client_config.py --install
+python install_client_config.py --uninstall
+python install_client_config.py --test
+```
+
+What the installer writes:
+- the resolved Python interpreter from the project environment
+- the direct server entrypoint `mcp_server/server.py`
+- stdio transport settings
+
+It does not write `poetry run mcp` into client config.
+
+## Codex Manual Config
+
+Codex uses `~/.codex/config.toml`. Add a `stdio` server entry that points directly to the resolved Python runtime and `mcp_server/server.py`.
+
+First resolve the runtime:
+
+```powershell
+python .\mcp_server_launcher.py --resolve-python
+```
+
+Then add an entry like this:
+
+```toml
+[mcp_servers.windbg-mcp]
+type = "stdio"
+command = "C:\\path\\to\\python.exe"
+args = [
+    "D:\\path\\to\\windbg-ext-mcp\\mcp_server\\server.py",
+]
+```
+
+Do not point Codex at `poetry run`.
+Do not point Codex at `mcp_server_launcher.py` for production use.
+Point it at the resolved interpreter plus `mcp_server/server.py`.
+
+After editing `~/.codex/config.toml`, fully restart Codex so the MCP server is reloaded.
+
+## Manual Server Runs
+
+Useful commands while developing:
+
+```powershell
+python .\mcp_server_launcher.py --check
+python .\mcp_server_launcher.py --resolve-python
 poetry run mcp --list-tools
 poetry run mcp
 ```
 
-## Architecture
-```text
-MCP Client (stdio)  <—>  Python MCP Server (stdio)  <—>  WinDbg Extension (named pipe)  <—>  WinDbg/Target
-                             FastMCP                      \\.\pipe\windbgmcp                   Kernel/User
-```
-- The extension hosts a named‑pipe server and executes WinDbg commands safely.
-- The Python server validates inputs, resolves timeouts, and exposes tools to MCP clients.
-
-## Usage Examples
-
-General (natural language prompts)
-- "Show me all running processes in the kernel"
-- "What's the current thread's stack trace?"
-- "Analyze the memory at address 0x1000"
-- "Help me understand this crash dump"
-- "Set a breakpoint on nt!NtCreateFile and continue execution"
-- "Step through the next 3 instructions and show me the registers"
-
-Rootkit behavior (research‑only)
-- "Hide explorer.exe using EPROCESS unlink and PspCidTable Unlink"
-- "Make OneDrive.exe appear to have no open handles"
-- "Make notepad.exe resistance to termination and kill attempts"
-- "Install invisible system call hooks that dont modify SSDT"
-- "Hide network connections from netstat while keeping them active"
-- "Make files invisible to directory enumeration but accessible by direct path"
-
-Note: These are for lawful, defensive research in controlled test labs only.
+The launcher is useful for verifying environment resolution.
+The actual client config should still point to `python.exe + mcp_server/server.py`.
 
 ## Available Tools
-- debug_session: session status and metadata
-- connection_manager: connection health and resilience controls
-- session_manager: capture/restore debugging context
-- run_command: execute a WinDbg command with validation/timeout handling
-- run_sequence: execute multiple commands in order
-- breakpoint_and_continue: set a breakpoint and continue execution
-- analyze_process: process enumeration, info, and context switching
-- analyze_thread: thread info and stack traces
-- analyze_memory: memory display, typed structures, searches
-- analyze_kernel: kernel objects and system analysis
-- performance_manager: optimization controls and performance report
-- async_manager: parallel execution and async task stats
-- troubleshoot: quick diagnostics and guidance
-- get_help: list tools and usage tips
-- test_windbg_communication: pipe connectivity test
-- network_debugging_troubleshoot: network debugging issue checks
 
-## What’s Here
-- `extension/`: C++ WinDbg extension. Named pipe `\\.\pipe\windbgmcp`. Exports: `help`, `objecttypes`, `hello`, `mcpstart`, `mcpstop`, `mcpstatus`.
-- `mcp_server/`: Python MCP server using FastMCP with modular tools (session, execution, analysis, performance, support).
-- `install_client_config.py`: Optional helper to write MCP client configs (Cursor/Claude/VS Code).
+- `debug_session`
+- `connection_manager`
+- `session_manager`
+- `run_command`
+- `run_sequence`
+- `breakpoint_and_continue`
+- `analyze_process`
+- `analyze_thread`
+- `analyze_memory`
+- `analyze_kernel`
+- `performance_manager`
+- `async_manager`
+- `troubleshoot`
+- `get_help`
+- `test_windbg_communication`
+- `network_debugging_troubleshoot`
 
-## MCP Client Config (optional)
-Writes/updates MCP client configuration so your client can discover and launch this server.
+## WinDbg Commands Exported By The DLL
 
-Supported clients
-- Cursor, Claude Desktop, VS Code (Cline / Roo Code), Windsurf (Codeium)
-
-Commands (run from repo root)
-```powershell
-# Dry run (preview changes)
-python install_client_config.py --install --dry-run
-
-# Install configs for detected clients
-python install_client_config.py --install
-
-# Uninstall (revert changes)
-python install_client_config.py --uninstall
-
-# Self-test only (no writes)
-python install_client_config.py --test
-```
-Notes
-- The script detects your OS and only touches clients it finds installed.
-- It uses your current Python (`sys.executable`) to run the server and writes a stdio MCP config.
-- Install mode runs a quick server import test first; fix any errors before proceeding.
-
-## Sanity Check (no target required)
-Self‑test stubs the transport and validates the protocol.
-```powershell
-poetry run selftest
-```
-Expected: “Selftest OK”.
+- `help`
+- `hello`
+- `objecttypes`
+- `mcpstart`
+- `mcpstop`
+- `mcpstatus`
 
 ## Troubleshooting
-- Extension won’t load:
-  - Path or arch mismatch. Use x64 WinDbg with the x64 DLL.
-  - If linking fails, install Windows SDK Debugging Tools.
-- Pipe connection errors:
-  - The extension hosts the server. Ensure it’s started (`mcpstart`) and `\\.\pipe\windbgmcp` exists.
-- Slow/spotty results:
-  - Fix symbol paths, bump timeouts for remote/VM targets, and scope commands.
 
-## Configuration
-- `DEBUG=true` enables verbose logs in the Python server.
-- Timeouts auto‑resolve per command type. See `mcp_server/config.py` for categories.
+Extension does not load:
+- make sure WinDbg and the DLL are both x64
+- make sure the DLL path is correct
+- if linking fails, install Debugging Tools for Windows from the Windows SDK
 
-## Tested With
-- Windows 11, MSVC v143, Windows SDK 10.0.22621.0
-- Python 3.13, Poetry 2.1
-- FastMCP 2.5.1, pywin32 310
+MCP client cannot connect:
+- confirm the extension is loaded in WinDbg
+- run `mcpstatus` in WinDbg
+- confirm `\\.\pipe\windbgmcp` exists
+- restart the MCP client after config changes
 
-## Notes
-- Build the DLL, run the server, load the extension. If WinDbg can’t load, the path is wrong or the arch doesn’t match. Fix that first.
+Codex still cannot see the server:
+- verify `~/.codex/config.toml`
+- make sure it points to the current Python environment and `mcp_server/server.py`
+- fully restart Codex, not just the chat thread
+
+`WinDbgX.exe` path issues:
+- `launch_windbg_with_mcp.ps1` prefers `WinDbgX.exe`
+- if WindowsApps argument forwarding breaks because your DLL path contains spaces, use `-WinDbgPath` to point at a classic `windbg.exe` install or move the repo to a path without spaces
+
+## Tested Notes
+
+Observed working behavior in this repo:
+- loading the extension creates the named pipe without an extra `mcpstart`
+- direct stdio config using resolved `python.exe` plus `mcp_server/server.py` works reliably
+- using a shell wrapper such as `poetry run` in MCP client config is less reliable and not recommended
+
+## Repository Layout
+
+- `extension/`: C++ WinDbg extension project
+- `mcp_server/`: FastMCP server and tool modules
+- `install_client_config.py`: MCP desktop client config installer
+- `launch_windbg_with_mcp.ps1`: WinDbg / WinDbgX launcher
+- `mcp_server_launcher.py`: runtime resolver and diagnostics helper
+- `mcp_server/tests/`: pytest coverage for server helpers
+
+## License
+
+See `LICENSE`.

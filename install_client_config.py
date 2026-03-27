@@ -6,6 +6,22 @@ import argparse
 import platform
 import shutil
 from pathlib import Path
+from mcp_server_launcher import resolve_python, SERVER_SCRIPT
+
+
+def get_repo_root() -> Path:
+    """Return the repository root."""
+    return Path(__file__).parent.absolute()
+
+
+def get_launcher_path() -> Path:
+    """Return the bootstrap launcher path used by MCP clients."""
+    return get_repo_root() / "mcp_server_launcher.py"
+
+
+def get_server_entrypoint() -> Path:
+    """Return the MCP server entrypoint."""
+    return Path(SERVER_SCRIPT)
 
 def get_os_type():
     """Detect the operating system type."""
@@ -184,12 +200,11 @@ def get_windbg_mcp_config():
         "network_debugging_troubleshoot",
     ]
     
-    # Get the current script directory to find the server
-    current_dir = Path(__file__).parent.absolute()
-    server_path = current_dir / "mcp_server" / "server.py"
+    server_path = get_server_entrypoint()
+    runtime_path = resolve_python()
     
     return {
-        "command": sys.executable,
+        "command": runtime_path,
         "args": [str(server_path)],
         "env": {
             "DEBUG": "false"  # Set to "true" for debug logging
@@ -230,13 +245,12 @@ def write_json_config(config_path, config_data):
 
 def install_windbg_mcp(config_path, quiet=False, dry_run: bool = False):
     """Install windbg-mcp configuration to the specified config file."""
-    # Verify that the server file exists
-    current_dir = Path(__file__).parent.absolute()
-    server_path = current_dir / "mcp_server" / "server.py"
+    launcher_path = get_launcher_path()
+    server_path = get_server_entrypoint()
     
-    if not server_path.exists():
+    if not launcher_path.exists() or not server_path.exists():
         if not quiet:
-            print(f"Error: Server file not found at {server_path}")
+            print(f"Error: Required file not found at {launcher_path} or {server_path}")
             print("Make sure you're running this script from the windbg-ext-mcp root directory")
         return False
     
@@ -246,6 +260,7 @@ def install_windbg_mcp(config_path, quiet=False, dry_run: bool = False):
     if dry_run:
         if not quiet:
             print(f"[DRY-RUN] Would install windbg-mcp at: {config_path}")
+            print(f"  Runtime path: {windbg_config['command']}")
             print(f"  Server path: {server_path}")
             print(f"  Tools configured: {len(windbg_config['autoApprove'])} tools")
             print("  Transport: stdio (FastMCP)")
@@ -259,6 +274,7 @@ def install_windbg_mcp(config_path, quiet=False, dry_run: bool = False):
 
     success = write_json_config(config_path, config)
     if success and not quiet:
+        print(f"  Runtime path: {windbg_config['command']}")
         print(f"  Server path: {server_path}")
         print(f"  Tools configured: {len(windbg_config['autoApprove'])} tools")
         print(f"  Transport: stdio (FastMCP)")
@@ -316,12 +332,12 @@ def process_clients(client_paths, action_func, quiet=False, dry_run: bool = Fals
 
 def test_server_installation(quiet=False):
     """Test that the WinDbg MCP server can be started."""
-    current_dir = Path(__file__).parent.absolute()
-    server_path = current_dir / "mcp_server" / "server.py"
+    current_dir = get_repo_root()
+    launcher_path = get_launcher_path()
     
-    if not server_path.exists():
+    if not launcher_path.exists():
         if not quiet:
-            print(f"ERROR: Server file not found: {server_path}")
+            print(f"ERROR: Launcher file not found: {launcher_path}")
             return False
     
     if not quiet:
@@ -329,18 +345,15 @@ def test_server_installation(quiet=False):
     
     try:
         import subprocess
-        import sys
         
-        # Try to import the server modules to check for syntax errors
         result = subprocess.run([
-            sys.executable, "-c", 
-            "import sys; sys.path.append('mcp_server'); import server; print('Server imports successfully')"
+            sys.executable, str(launcher_path), "--check"
         ], capture_output=True, text=True, cwd=current_dir, timeout=10)
         
         if result.returncode == 0:
             if not quiet:
                 print("Server syntax check passed")
-                print("All required modules can be imported")
+                print(result.stdout.strip() or "Runtime resolution succeeded")
             return True
         else:
             if not quiet:
